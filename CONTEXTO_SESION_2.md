@@ -1,12 +1,13 @@
 # ════════════════════════════════════════════════════════════════
-# CONTEXTO DE SESIÓN — SecretarIA (Continuación)
-# Actualizado: Marzo 4, 2026 — Fin de Sesión 1
+# CONTEXTO DE SESIÓN — SecretarIA (Sesión 2 Completada)
+# Actualizado: Marzo 4, 2026 — Fin de Sesión 2
 # ════════════════════════════════════════════════════════════════
 
 ## RESUMEN EJECUTIVO
 
-SecretarIA está 60% avanzado. Se completó FASE 1 (Supabase) y FASE 2 (API Flask).
-Falta: Deployar en Railway, configurar n8n, conectar WATI.
+SecretarIA está 75% avanzado. Completadas FASES 1, 2 y 3.
+✅ Railway deployment funcionando: https://web-production-a5da.up.railway.app/
+❌ n8n local: Problemas de instalación (Node.js versión)
 
 Repositorio GitHub: https://github.com/dannyserbangutierrez83/secretarIA
 
@@ -49,6 +50,19 @@ Repositorio GitHub: https://github.com/dannyserbangutierrez83/secretarIA
 - /mensaje con Claude: OK
 - /lista: OK
 
+### FASE 3: Railway Deployment
+- ✅ Cuenta Railway creada
+- ✅ Repo GitHub conectado (dannyserbangutierrez83/secretarIA)
+- ✅ Variables de entorno configuradas:
+  - SUPABASE_URL = https://tizfjnbfqvfyxohzjdpw.supabase.co
+  - SUPABASE_KEY = sb_publishable_lDJoxrIHrAmQbovrk0RS7A_j07qQ7Nu
+  - ANTHROPIC_API_KEY = [configurado]
+- ✅ Deploy automático exitoso
+- ✅ URL pública: https://web-production-a5da.up.railway.app/
+- ✅ Tests en producción: ✅ /health, ✅ /mensaje, ✅ /lista
+
+**Archivos:** api.py + Procfile + requirements.txt ✅
+
 ### FASE 0: GitHub
 - ✅ Repo creado: https://github.com/dannyserbangutierrez83/secretarIA
 - ✅ 2 commits pusheados:
@@ -60,17 +74,27 @@ Repositorio GitHub: https://github.com/dannyserbangutierrez83/secretarIA
 
 ## ⏳ PENDIENTE
 
-### FASE 3: Railway Deployment (NEXT)
+### FASE 4: n8n Orquestador (EN PROGRESO - PROBLEMAS)
+**Estado actual:** ❌ Problemas de instalación local
+- Node.js actualizado a v24.14.0 ✅
+- n8n requiere Node >=20 ✅
+- Pero n8n no inicia (posible conflicto de dependencias)
+
+**Alternativas:**
+1. **Docker n8n** (recomendado): `docker run -p 5678:5678 n8nio/n8n`
+2. **n8n Cloud** (pago): https://n8n.cloud
+3. **Railway n8n**: Deploy n8n en Railway (costo ~$5-15/mes)
+
 **Qué falta:**
-1. Crear cuenta en Railway.app
-2. Conectar repo GitHub (autorizar)
-3. Configurar variables de entorno (SUPABASE_URL, SUPABASE_KEY, ANTHROPIC_API_KEY)
-4. Deploy automático
-5. Obtener URL pública (https://secretaria-XXXXX.railway.app)
+1. Levantar n8n funcionando
+2. Crear webhook receiver para WATI
+3. Crear flujo: WATI → n8n → POST /mensaje → Supabase → Respuesta WhatsApp
+4. Testear flujo end-to-end
 
-**Archivos listos:** Procfile + requirements.txt + api.py ✅
+**Archivos a crear:**
+- `n8n_secretaria_workflow.json` — Flujo exportable
 
-### FASE 4: n8n Orquestador
+### FASE 5: WATI WhatsApp Gateway
 **Qué falta:**
 1. Levantar n8n en Railway (o editor local)
 2. Crear webhook receiver para WATI
@@ -131,21 +155,17 @@ Constructor WhatsApp
 
 ## 📋 PRÓXIMOS PASOS (ORDEN)
 
-### Sesión 2 (Ahora):
-1. ✏️ Crear cuenta Railway
-2. 🚀 Conectar repo + deploy automático
-3. 📝 Verificar que API funciona en Railway
-4. 🔄 Generar URL pública de API
-
-### Sesión 3:
-1. 📊 Levantar n8n (decisión: Railway vs local)
-2. 🔗 Crear webhook + flujo n8n
-3. 🧪 Testear flujo completo
+### Sesión 3 (Próxima):
+1. 🔧 **Resolver n8n**: Elegir Docker vs Cloud vs Railway
+2. 🚀 **Levantar n8n** funcionando en puerto 5678
+3. 🔗 **Crear webhook** en n8n para recibir de WATI
+4. ⚙️ **Configurar flujo**: WATI → n8n → Railway API → Supabase
+5. 🧪 **Test end-to-end**: Simular mensaje WhatsApp
 
 ### Sesión 4:
 1. 💬 Crear cuenta WATI
 2. ⚙️ Configurar webhook WATI → n8n
-3. 🎉 Primer test con Darío
+3. 🎉 Primer test con Darío vía WhatsApp
 
 ---
 
