@@ -93,7 +93,7 @@ Repositorio GitHub: https://github.com/dannyserbangutierrez83/secretarIA
 
 ## 📋 CHECKLIST SESIÓN 3
 
-- [ ] Instalar Docker (si eliges Docker n8n)
+- [x] Instalar Docker ✅ (ya instalado)
 - [ ] Levantar n8n: `docker run -p 5678:5678 n8nio/n8n`
 - [ ] Acceder a http://localhost:5678
 - [ ] Crear webhook node en n8n
