@@ -1,9 +1,8 @@
 """
 API Flask para SecretarIA
-Expone agente_obra.py como servicio HTTP para integración con n8n/WATI
+Expone agente_obra.py como servicio HTTP para integración con n8n/Telegram
 """
 import os
-import json
 import logging
 from datetime import datetime
 from flask import Flask, request, jsonify
@@ -17,16 +16,15 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Clientes
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 anthropic_client = anthropic.Anthropic()
 
-# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Flask app
 app = Flask(__name__)
+
+MAX_OBRAS = 5
 
 # ── Sistema prompt del agente ──────────────────────────────────────────────────
 SYSTEM_PROMPT = """Sos SecretarIA, el asistente de obra de un constructor uruguayo.
@@ -37,7 +35,7 @@ Usás las herramientas disponibles para guardar, mostrar, marcar y limpiar la li
 
 Reglas:
 - Si el constructor menciona algo que necesita comprar o hacer → usá guardar_item
-- Si pregunta qué tiene pendiente → usá ver_lista  
+- Si pregunta qué tiene pendiente → usá ver_lista
 - Si dice que ya compró algo → usá marcar_comprado con el ID correcto
 - Si pide limpiar los comprados → usá limpiar_lista
 - Confirmá siempre lo que hiciste en lenguaje simple
@@ -94,9 +92,8 @@ TOOLS = [
     }
 ]
 
-# ── Funciones de herramientas ──────────────────────────────────────────────────
+# ── Funciones de herramientas (Claude) ────────────────────────────────────────
 def guardar_item(obra_id: int, item: str) -> str:
-    """Guarda un item en Supabase."""
     try:
         resp = supabase.table("items").insert({
             "obra_id": obra_id,
@@ -111,73 +108,67 @@ def guardar_item(obra_id: int, item: str) -> str:
         return f"❌ Error guardando: {str(e)}"
 
 def ver_lista(obra_id: int) -> str:
-    """Muestra pendientes y comprados desde Supabase."""
     try:
         resp = supabase.table("items").select("id, item, comprado, fecha_anotacion").eq("obra_id", obra_id).execute()
-        
+
         if not resp.data:
             return "La lista está vacía."
-        
+
         pendientes = [i for i in resp.data if not i["comprado"]]
-        comprados = [i for i in resp.data if i["comprado"]]
-        
+        comprados  = [i for i in resp.data if i["comprado"]]
+
         resp_text = ""
         if pendientes:
             resp_text += "📋 *PENDIENTES:*\n"
             for item in pendientes:
                 fecha = item["fecha_anotacion"][:10] if item["fecha_anotacion"] else "?"
                 resp_text += f"  [{item['id']}] {item['item']}  _(anotado {fecha})_\n"
-        
+
         if comprados:
             resp_text += "\n✅ *YA COMPRADO:*\n"
             for item in comprados:
                 resp_text += f"  [{item['id']}] ~~{item['item']}~~\n"
-        
+
         return resp_text.strip()
     except Exception as e:
         logger.error(f"Error leyendo lista: {e}")
         return f"❌ Error leyendo lista: {str(e)}"
 
 def marcar_comprado(obra_id: int, ids: list) -> str:
-    """Marca items como comprados en Supabase."""
     try:
-        marcados = []
-        no_encontrados = []
-        
-        for id_buscado in ids:
-            resp = supabase.table("items").select("item").eq("id", id_buscado).eq("obra_id", obra_id).execute()
-            if resp.data:
-                supabase.table("items").update({
-                    "comprado": True,
-                    "fecha_compra": datetime.now().isoformat()
-                }).eq("id", id_buscado).execute()
-                marcados.append(resp.data[0]["item"])
-            else:
-                no_encontrados.append(id_buscado)
-        
+        # Un SELECT para todos los IDs pedidos
+        resp = supabase.table("items").select("id, item").in_("id", ids).eq("obra_id", obra_id).execute()
+        encontrados = {row["id"]: row["item"] for row in resp.data}
+        ids_validos = list(encontrados.keys())
+        no_encontrados = [i for i in ids if i not in encontrados]
+
+        # Un UPDATE para todos los válidos
+        if ids_validos:
+            supabase.table("items").update({
+                "comprado": True,
+                "fecha_compra": datetime.now().isoformat()
+            }).in_("id", ids_validos).execute()
+
         resp_text = ""
-        if marcados:
-            resp_text += "✅ Marcado como comprado: " + ", ".join(f"'{m}'" for m in marcados)
+        if ids_validos:
+            resp_text += "✅ Marcado como comprado: " + ", ".join(f"'{encontrados[i]}'" for i in ids_validos)
         if no_encontrados:
             resp_text += f"\n⚠️ No encontré los IDs: {no_encontrados}"
-        
+
         return resp_text.strip() if resp_text else "No se actualizó nada."
     except Exception as e:
         logger.error(f"Error marcando: {e}")
         return f"❌ Error marcando: {str(e)}"
 
 def limpiar_lista(obra_id: int) -> str:
-    """Elimina items comprados de Supabase."""
     try:
-        resp = supabase.table("items").select("id").eq("obra_id", obra_id).eq("comprado", True).execute()
+        # Un solo DELETE — Supabase retorna las filas eliminadas
+        resp = supabase.table("items").delete().eq("obra_id", obra_id).eq("comprado", True).execute()
         antes = len(resp.data)
-        
+
         if antes == 0:
             return "No había items comprados para limpiar."
-        
-        for item in resp.data:
-            supabase.table("items").delete().eq("id", item["id"]).execute()
-        
+
         return f"🗑️ Se eliminaron {antes} item(s) ya comprados. Lista actualizada."
     except Exception as e:
         logger.error(f"Error limpiando: {e}")
@@ -195,34 +186,131 @@ def ejecutar_herramienta(nombre: str, inputs: dict, obra_id: int) -> str:
     else:
         return f"Herramienta desconocida: {nombre}"
 
-def obtener_o_crear_obra(constructor_id: str, obra_nombre: str) -> int:
-    """Obtiene la obra activa del constructor o crea una nueva."""
+# ── Usuarios y obras ───────────────────────────────────────────────────────────
+def obtener_usuario(telegram_id: str) -> tuple[bool, int | None]:
+    """
+    Una sola query: retorna (activo, obra_activa_id).
+    Usado en el endpoint /mensaje para evitar dos queries a la tabla usuarios.
+    """
     try:
-        resp = supabase.table("obras").select("id").eq("constructor_id", constructor_id).eq("activa", True).limit(1).execute()
-        if resp.data:
-            return resp.data[0]["id"]
-        
-        resp = supabase.table("obras").insert({
-            "nombre": obra_nombre,
-            "constructor_id": constructor_id,
-            "activa": True
-        }).execute()
-        return resp.data[0]["id"]
+        resp = supabase.table("usuarios").select("activo, obra_activa_id").eq("telegram_id", telegram_id).execute()
+        if not resp.data:
+            return False, None
+        row = resp.data[0]
+        return bool(row["activo"]), row["obra_activa_id"]
     except Exception as e:
-        logger.error(f"Error obteniendo/creando obra: {e}")
-        raise
+        logger.error(f"Error obteniendo usuario: {e}")
+        return False, None
+
+def obtener_obra_activa(telegram_id: str) -> int | None:
+    """Retorna el obra_id activo del usuario."""
+    _, obra_activa_id = obtener_usuario(telegram_id)
+    return obra_activa_id
+
+def _obras_del_usuario(telegram_id: str) -> list:
+    """Helper compartido: retorna lista de obras del constructor ordenadas por id."""
+    resp = supabase.table("obras").select("id, nombre").eq("constructor_id", telegram_id).order("id").execute()
+    return resp.data or []
+
+def listar_obras(telegram_id: str) -> str:
+    try:
+        obras = _obras_del_usuario(telegram_id)
+        _, obra_activa_id = obtener_usuario(telegram_id)
+
+        if not obras:
+            return "No tenés obras todavía. Creá una con:\n/nueva Nombre de la obra"
+
+        lineas = []
+        for i, obra in enumerate(obras, 1):
+            activa = " ← activa" if obra["id"] == obra_activa_id else ""
+            lineas.append(f"{i}. {obra['nombre']}{activa}")
+
+        lineas.append(f"\n{len(obras)}/{MAX_OBRAS} obras. Para cambiar: /cambiar 2")
+        return "\n".join(lineas)
+    except Exception as e:
+        logger.error(f"Error listando obras: {e}")
+        return f"❌ Error: {str(e)}"
+
+def crear_obra(telegram_id: str, nombre: str) -> str:
+    try:
+        obras_existentes = _obras_del_usuario(telegram_id)
+
+        if len(obras_existentes) >= MAX_OBRAS:
+            return f"⚠️ Ya tenés {MAX_OBRAS} obras (el máximo). Eliminá una antes de crear otra."
+
+        nueva = supabase.table("obras").insert({
+            "nombre": nombre,
+            "constructor_id": telegram_id,
+            "creada_en": datetime.now().isoformat()
+        }).execute()
+
+        nueva_id = nueva.data[0]["id"]
+        supabase.table("usuarios").update({"obra_activa_id": nueva_id}).eq("telegram_id", telegram_id).execute()
+
+        total = len(obras_existentes) + 1
+        return f"✅ Obra '{nombre}' creada y activada. Tenés {total}/{MAX_OBRAS} obras."
+    except Exception as e:
+        logger.error(f"Error creando obra: {e}")
+        return f"❌ Error: {str(e)}"
+
+def cambiar_obra(telegram_id: str, numero: str) -> str:
+    try:
+        if not numero.isdigit():
+            return "⚠️ Usá un número. Ej: /cambiar 2"
+
+        obras = _obras_del_usuario(telegram_id)
+
+        if not obras:
+            return "No tenés obras. Creá una con /nueva Nombre"
+
+        idx = int(numero) - 1
+        if idx < 0 or idx >= len(obras):
+            return f"⚠️ Número inválido. Tenés {len(obras)} obras."
+
+        obra = obras[idx]
+        supabase.table("usuarios").update({"obra_activa_id": obra["id"]}).eq("telegram_id", telegram_id).execute()
+
+        return f"✅ Cambiaste a '{obra['nombre']}'"
+    except Exception as e:
+        logger.error(f"Error cambiando obra: {e}")
+        return f"❌ Error: {str(e)}"
+
+def manejar_comando(telegram_id: str, texto: str) -> str | None:
+    """
+    Detecta y ejecuta comandos especiales.
+    Retorna la respuesta si era un comando, None si no lo era.
+    """
+    texto = texto.strip()
+
+    if texto == "/obras":
+        return listar_obras(telegram_id)
+
+    if texto.startswith("/nueva "):
+        nombre = texto.removeprefix("/nueva ").strip()
+        if not nombre:
+            return "⚠️ Escribí el nombre de la obra. Ej: /nueva Casa Playa"
+        return crear_obra(telegram_id, nombre)
+
+    if texto.startswith("/cambiar "):
+        numero = texto.removeprefix("/cambiar ").strip()
+        return cambiar_obra(telegram_id, numero)
+
+    if texto == "/ayuda":
+        return (
+            "📋 *Comandos disponibles:*\n"
+            "/obras — ver tus obras\n"
+            "/nueva Nombre — crear obra nueva\n"
+            "/cambiar 2 — cambiar a la obra número 2\n"
+            "/ayuda — este mensaje\n\n"
+            "Para todo lo demás, escribí normalmente y te ayudo."
+        )
+
+    return None
 
 # ── Procesar mensajes con Claude ───────────────────────────────────────────────
-def procesar_mensaje(mensaje_usuario: str, obra_id: int, historial: list = None) -> tuple[str, list]:
-    """
-    Procesa un mensaje con Claude usando tool use.
-    Retorna (respuesta_final, historial_actualizado)
-    """
-    if historial is None:
-        historial = []
-    
-    historial.append({"role": "user", "content": mensaje_usuario})
-    
+def procesar_mensaje(mensaje_usuario: str, obra_id: int) -> str:
+    historial = [{"role": "user", "content": mensaje_usuario}]
+
     while True:
         try:
             response = anthropic_client.messages.create(
@@ -232,40 +320,36 @@ def procesar_mensaje(mensaje_usuario: str, obra_id: int, historial: list = None)
                 tools=TOOLS,
                 messages=historial
             )
-            
+
             historial.append({"role": "assistant", "content": response.content})
-            
-            # Si Claude quiere usar herramientas
+
             if response.stop_reason == "tool_use":
-                resultados_herramientas = []
+                resultados = []
                 for bloque in response.content:
                     if bloque.type == "tool_use":
                         resultado = ejecutar_herramienta(bloque.name, bloque.input, obra_id)
-                        resultados_herramientas.append({
+                        resultados.append({
                             "type": "tool_result",
                             "tool_use_id": bloque.id,
                             "content": resultado
                         })
-                
-                historial.append({"role": "user", "content": resultados_herramientas})
+                historial.append({"role": "user", "content": resultados})
                 continue
-            
-            # Respuesta final
+
             for bloque in response.content:
                 if hasattr(bloque, "text"):
-                    return bloque.text, historial
-            
-            return "(sin respuesta)", historial
-        
+                    return bloque.text
+
+            return "(sin respuesta)"
+
         except Exception as e:
             logger.error(f"Error procesando mensaje: {e}")
-            return f"❌ Error: {str(e)}", historial
+            return f"❌ Error: {str(e)}"
 
 # ── Endpoints HTTP ─────────────────────────────────────────────────────────────
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check endpoint para Railway/Docker"""
     return jsonify({
         "status": "ok",
         "service": "SecretarIA API",
@@ -276,70 +360,92 @@ def health():
 def mensaje():
     """
     Procesa un mensaje de usuario.
-    Espera JSON:
-    {
-        "texto": "necesito 20 bolsas de cemento",
-        "constructor_id": "dario-obra-001",
-        "obra_nombre": "Obra Principal"
-    }
-    Retorna JSON:
-    {
-        "respuesta": "✅ Guardado: '20 bolsas de cemento' (ID: 123)",
-        "obra_id": 123
-    }
+    Espera JSON: { "texto": "...", "constructor_id": "123456789" }
+    Retorna JSON: { "respuesta": "..." }
     """
     try:
         data = request.get_json()
-        
-        # Validar inputs
+
         if not data or "texto" not in data:
             return jsonify({"error": "Falta campo 'texto'"}), 400
-        
+
         texto = data.get("texto", "").strip()
-        constructor_id = data.get("constructor_id", "usuario-default")
-        obra_nombre = data.get("obra_nombre", "Obra Predeterminada")
-        
+        constructor_id = str(data.get("constructor_id", "")).strip()
+
         if not texto:
             return jsonify({"error": "El texto no puede estar vacío"}), 400
-        
-        # Obtener o crear obra
-        obra_id = obtener_o_crear_obra(constructor_id, obra_nombre)
-        
-        # Procesar mensaje con Claude (sin guardar historial en la respuesta)
-        respuesta, _ = procesar_mensaje(texto, obra_id, None)
-        
-        logger.info(f"Constructor {constructor_id} → Respuesta procesada")
-        
-        return jsonify({
-            "respuesta": respuesta,
-            "obra_id": obra_id
-        }), 200
-    
+        if not constructor_id:
+            return jsonify({"error": "Falta campo 'constructor_id'"}), 400
+
+        # Una sola query a usuarios: auth + obra_activa
+        activo, obra_id = obtener_usuario(constructor_id)
+
+        if not activo:
+            return jsonify({
+                "respuesta": "Hola! Este servicio es privado. Contactá a @secretaria_ia para acceder. 🔒"
+            }), 200
+
+        # Detectar comandos especiales
+        respuesta_comando = manejar_comando(constructor_id, texto)
+        if respuesta_comando is not None:
+            return jsonify({"respuesta": respuesta_comando}), 200
+
+        # Mensaje normal → Claude
+        if obra_id is None:
+            return jsonify({
+                "respuesta": "No tenés ninguna obra activa. Creá una con:\n/nueva Nombre de la obra"
+            }), 200
+
+        respuesta = procesar_mensaje(texto, obra_id)
+        logger.info(f"Constructor {constructor_id} → OK")
+
+        return jsonify({"respuesta": respuesta}), 200
+
     except Exception as e:
         logger.error(f"Error en /mensaje: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/lista", methods=["POST"])
 def lista():
-    """Obtiene la lista de items de una obra (sin procesar con IA)."""
+    """Obtiene la lista de items de la obra activa (sin IA)."""
     try:
         data = request.get_json()
-        constructor_id = data.get("constructor_id", "usuario-default")
-        obra_nombre = data.get("obra_nombre", "Obra Predeterminada")
-        
-        obra_id = obtener_o_crear_obra(constructor_id, obra_nombre)
-        lista_texto = ver_lista(obra_id)
-        
-        # Parsear la lista para retornar JSON
-        resp = supabase.table("items").select("*").eq("obra_id", obra_id).execute()
-        items = resp.data if resp.data else []
-        
+        constructor_id = str(data.get("constructor_id", "")).strip()
+
+        if not constructor_id:
+            return jsonify({"error": "Falta 'constructor_id'"}), 400
+
+        obra_id = obtener_obra_activa(constructor_id)
+        if obra_id is None:
+            return jsonify({"lista_texto": "No tenés obra activa.", "items": []}), 200
+
+        # Una sola query: usamos los datos para texto formateado y JSON
+        resp = supabase.table("items").select("id, item, comprado, fecha_anotacion").eq("obra_id", obra_id).execute()
+        items = resp.data or []
+
+        if not items:
+            lista_texto = "La lista está vacía."
+        else:
+            pendientes = [i for i in items if not i["comprado"]]
+            comprados  = [i for i in items if i["comprado"]]
+            lineas = []
+            if pendientes:
+                lineas.append("📋 *PENDIENTES:*")
+                for item in pendientes:
+                    fecha = item["fecha_anotacion"][:10] if item["fecha_anotacion"] else "?"
+                    lineas.append(f"  [{item['id']}] {item['item']}  _(anotado {fecha})_")
+            if comprados:
+                lineas.append("\n✅ *YA COMPRADO:*")
+                for item in comprados:
+                    lineas.append(f"  [{item['id']}] ~~{item['item']}~~")
+            lista_texto = "\n".join(lineas)
+
         return jsonify({
             "obra_id": obra_id,
             "lista_texto": lista_texto,
             "items": items
         }), 200
-    
+
     except Exception as e:
         logger.error(f"Error en /lista: {e}")
         return jsonify({"error": str(e)}), 500
