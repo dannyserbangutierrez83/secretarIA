@@ -35,8 +35,10 @@ Usás las herramientas disponibles para guardar, mostrar, marcar y limpiar la li
 
 Reglas:
 - Si el constructor menciona algo que necesita comprar o hacer → usá guardar_item
+- Si menciona cantidad (ej: "20 bolsas") → guardá con el campo cantidad
 - Si pregunta qué tiene pendiente → usá ver_lista
-- Si dice que ya compró algo → usá marcar_comprado con el ID correcto
+- Si dice que compró TODO de algo → usá marcar_comprado con el ID correcto
+- Si dice que compró UNA PARTE (ej: "compré 10 de las 20 bolsas") → usá actualizar_cantidad
 - Si pide limpiar los comprados → usá limpiar_lista
 - Confirmá siempre lo que hiciste en lenguaje simple
 - No inventes IDs, primero mostrá la lista si no sabés los IDs
@@ -47,13 +49,17 @@ Reglas:
 TOOLS = [
     {
         "name": "guardar_item",
-        "description": "Guarda un material o tarea pendiente en la lista de obra.",
+        "description": "Guarda un material o tarea pendiente en la lista de obra. Si el usuario menciona una cantidad, guardala en cantidad_total.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "item": {
                     "type": "string",
-                    "description": "El material o tarea a guardar. Ej: '20 bolsas de cemento'"
+                    "description": "El material o tarea a guardar. Ej: 'bolsas de cemento'"
+                },
+                "cantidad": {
+                    "type": "number",
+                    "description": "Cantidad total necesaria. Ej: 20. Omitir si no se menciona cantidad."
                 }
             },
             "required": ["item"]
@@ -70,7 +76,7 @@ TOOLS = [
     },
     {
         "name": "marcar_comprado",
-        "description": "Marca uno o varios items como comprados o completados.",
+        "description": "Marca uno o varios items como completamente comprados.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -81,6 +87,24 @@ TOOLS = [
                 }
             },
             "required": ["ids"]
+        }
+    },
+    {
+        "name": "actualizar_cantidad",
+        "description": "Registra que se compró una parte de un item con cantidad. Resta lo comprado del pendiente. Si queda 0 o menos, lo marca como comprado.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "ID del item a actualizar."
+                },
+                "cantidad_comprada": {
+                    "type": "number",
+                    "description": "Cantidad que se compró ahora."
+                }
+            },
+            "required": ["id", "cantidad_comprada"]
         }
     },
     {
@@ -95,15 +119,22 @@ TOOLS = [
 ]
 
 # ── Funciones de herramientas (Claude) ────────────────────────────────────────
-def guardar_item(obra_id: int, item: str) -> str:
+def guardar_item(obra_id: int, item: str, cantidad: float = None) -> str:
     try:
-        resp = supabase.table("items").insert({
+        datos = {
             "obra_id": obra_id,
             "item": item,
             "comprado": False,
             "fecha_anotacion": datetime.now().isoformat()
-        }).execute()
+        }
+        if cantidad is not None:
+            datos["cantidad_total"] = cantidad
+            datos["cantidad_pendiente"] = cantidad
+
+        resp = supabase.table("items").insert(datos).execute()
         new_id = resp.data[0]["id"]
+        if cantidad is not None:
+            return f"✅ Guardado: '{item}' — cantidad: {cantidad} (ID: {new_id})"
         return f"✅ Guardado: '{item}' (ID: {new_id})"
     except Exception as e:
         logger.error(f"Error guardando item: {e}")
@@ -111,7 +142,7 @@ def guardar_item(obra_id: int, item: str) -> str:
 
 def ver_lista(obra_id: int) -> str:
     try:
-        resp = supabase.table("items").select("id, item, comprado, fecha_anotacion").eq("obra_id", obra_id).execute()
+        resp = supabase.table("items").select("id, item, comprado, fecha_anotacion, cantidad_total, cantidad_pendiente").eq("obra_id", obra_id).execute()
 
         if not resp.data:
             return "La lista está vacía."
@@ -124,7 +155,11 @@ def ver_lista(obra_id: int) -> str:
             resp_text += "📋 *PENDIENTES:*\n"
             for item in pendientes:
                 fecha = item["fecha_anotacion"][:10] if item["fecha_anotacion"] else "?"
-                resp_text += f"  [{item['id']}] {item['item']}  _(anotado {fecha})_\n"
+                if item.get("cantidad_total") is not None:
+                    cant = f" — {item['cantidad_pendiente']}/{item['cantidad_total']} pendientes"
+                else:
+                    cant = ""
+                resp_text += f"  [{item['id']}] {item['item']}{cant}  _(anotado {fecha})_\n"
 
         if comprados:
             resp_text += "\n✅ *YA COMPRADO:*\n"
@@ -135,6 +170,32 @@ def ver_lista(obra_id: int) -> str:
     except Exception as e:
         logger.error(f"Error leyendo lista: {e}")
         return f"❌ Error leyendo lista: {str(e)}"
+
+def actualizar_cantidad(obra_id: int, id: int, cantidad_comprada: float) -> str:
+    try:
+        resp = supabase.table("items").select("id, item, cantidad_total, cantidad_pendiente").eq("id", id).eq("obra_id", obra_id).execute()
+        if not resp.data:
+            return f"⚠️ No encontré el item con ID {id}."
+
+        row = resp.data[0]
+        if row["cantidad_total"] is None:
+            return f"⚠️ '{row['item']}' no tiene cantidad definida. Usá marcar_comprado si ya lo compraste todo."
+
+        nueva_pendiente = (row["cantidad_pendiente"] or row["cantidad_total"]) - cantidad_comprada
+
+        if nueva_pendiente <= 0:
+            supabase.table("items").update({
+                "cantidad_pendiente": 0,
+                "comprado": True,
+                "fecha_compra": datetime.now().isoformat()
+            }).eq("id", id).execute()
+            return f"✅ '{row['item']}' completado. Compraste todo."
+        else:
+            supabase.table("items").update({"cantidad_pendiente": nueva_pendiente}).eq("id", id).execute()
+            return f"✅ '{row['item']}': compraste {cantidad_comprada}, quedan {nueva_pendiente} pendientes."
+    except Exception as e:
+        logger.error(f"Error actualizando cantidad: {e}")
+        return f"❌ Error: {str(e)}"
 
 def marcar_comprado(obra_id: int, ids: list) -> str:
     try:
@@ -178,11 +239,13 @@ def limpiar_lista(obra_id: int) -> str:
 
 def ejecutar_herramienta(nombre: str, inputs: dict, obra_id: int) -> str:
     if nombre == "guardar_item":
-        return guardar_item(obra_id, inputs["item"])
+        return guardar_item(obra_id, inputs["item"], inputs.get("cantidad"))
     elif nombre == "ver_lista":
         return ver_lista(obra_id)
     elif nombre == "marcar_comprado":
         return marcar_comprado(obra_id, inputs["ids"])
+    elif nombre == "actualizar_cantidad":
+        return actualizar_cantidad(obra_id, inputs["id"], inputs["cantidad_comprada"])
     elif nombre == "limpiar_lista":
         return limpiar_lista(obra_id)
     else:
