@@ -39,7 +39,9 @@ Reglas:
 - Si dice que ya compró algo → usá marcar_comprado con el ID correcto
 - Si pide limpiar los comprados → usá limpiar_lista
 - Confirmá siempre lo que hiciste en lenguaje simple
-- No inventes IDs, primero mostrá la lista si no sabés los IDs"""
+- No inventes IDs, primero mostrá la lista si no sabés los IDs
+- Nunca menciones los IDs al usuario, son solo para uso interno tuyo
+- Cuando listés items, mostralos sin el número de ID"""
 
 # ── Herramientas ───────────────────────────────────────────────────────────────
 TOOLS = [
