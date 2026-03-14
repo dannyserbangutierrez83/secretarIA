@@ -15,6 +15,7 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+API_SECRET   = os.getenv("API_SECRET")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 anthropic_client = anthropic.Anthropic()
@@ -23,6 +24,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+def validar_secret(req) -> bool:
+    """Verifica que el header X-API-Secret coincida con API_SECRET."""
+    if not API_SECRET:
+        return True  # si no está configurado, no bloquea (retrocompatibilidad)
+    return req.headers.get("X-API-Secret") == API_SECRET
 
 MAX_OBRAS = 5
 
@@ -592,6 +599,9 @@ def mensaje():
     Espera JSON: { "texto": "...", "constructor_id": "123456789" }
     Retorna JSON: { "respuesta": "..." }
     """
+    if not validar_secret(request):
+        return jsonify({"error": "No autorizado"}), 401
+
     try:
         data = request.get_json()
 
@@ -637,6 +647,9 @@ def mensaje():
 @app.route("/lista", methods=["POST"])
 def lista():
     """Obtiene la lista de items de la obra activa (sin IA)."""
+    if not validar_secret(request):
+        return jsonify({"error": "No autorizado"}), 401
+
     try:
         data = request.get_json()
         constructor_id = str(data.get("constructor_id", "")).strip()
