@@ -53,7 +53,7 @@ Reglas:
 - Si pide limpiar los comprados → usá limpiar_lista
 - Si menciona un proveedor, contacto o teléfono de alguien que trabaja en obra → usá guardar_contacto
 - Si pregunta por un contacto, teléfono o proveedor → usá ver_contactos
-- Si pide borrar o eliminar un contacto → usá eliminar_contacto
+- Si pide borrar o eliminar un contacto → usá eliminar_contacto con confirmar=false primero, y solo con confirmar=true cuando el usuario haya confirmado explícitamente
 - Confirmá siempre lo que hiciste en lenguaje simple
 - No inventes IDs, primero mostrá la lista si no sabés los IDs
 - Nunca menciones los IDs al usuario, son solo para uso interno tuyo
@@ -212,16 +212,20 @@ TOOLS = [
     },
     {
         "name": "eliminar_contacto",
-        "description": "Elimina un contacto por nombre. Si hay varios con ese nombre, muestra cuáles son para que el usuario confirme cuál borrar.",
+        "description": "Elimina un contacto. SIEMPRE llamar primero con confirmar=false para mostrar qué se va a borrar y pedir confirmación. Solo llamar con confirmar=true cuando el usuario confirmó explícitamente.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "nombre": {
                     "type": "string",
                     "description": "Nombre del contacto a eliminar. Ej: 'Juan el plomero'"
+                },
+                "confirmar": {
+                    "type": "boolean",
+                    "description": "false = mostrar qué se borra y pedir confirmación. true = borrar efectivamente (solo si el usuario confirmó)."
                 }
             },
-            "required": ["nombre"]
+            "required": ["nombre", "confirmar"]
         }
     },
     {
@@ -450,8 +454,9 @@ def ver_contactos(constructor_id: str, rubro: str = None) -> str:
         logger.error(f"Error leyendo contactos: {e}")
         return f"❌ Error: {str(e)}"
 
-def eliminar_contacto(constructor_id: str, nombre: str) -> str:
+def eliminar_contacto(constructor_id: str, nombre: str, confirmar: bool) -> str:
     try:
+        # Buscar coincidencias
         resp = supabase.table("contactos").select("id, nombre, telefono, rubro") \
             .eq("constructor_id", constructor_id) \
             .ilike("nombre", f"%{nombre}%") \
@@ -459,10 +464,17 @@ def eliminar_contacto(constructor_id: str, nombre: str) -> str:
         encontrados = resp.data or []
 
         if not encontrados:
-            return f"⚠️ No encontré ningún contacto con ese nombre."
+            return "⚠️ No encontré ningún contacto con ese nombre."
+
+        # Nunca borrar todos los contactos de una vez
+        total_resp = supabase.table("contactos").select("id", count="exact") \
+            .eq("constructor_id", constructor_id).execute()
+        total = total_resp.count or 0
+        if len(encontrados) >= total and total > 0:
+            return "⚠️ No puedo borrar todos los contactos a la vez. Especificá cuál querés eliminar."
 
         if len(encontrados) > 1:
-            lineas = [f"⚠️ Encontré varios contactos con ese nombre, ¿cuál querés borrar?"]
+            lineas = ["⚠️ Encontré varios contactos con ese nombre:"]
             for c in encontrados:
                 rubro_txt = f" [{c['rubro']}]" if c.get("rubro") else ""
                 lineas.append(f"  {c['nombre']}{rubro_txt} — {c['telefono']}")
@@ -470,8 +482,12 @@ def eliminar_contacto(constructor_id: str, nombre: str) -> str:
             return "\n".join(lineas)
 
         c = encontrados[0]
-        supabase.table("contactos").delete().eq("id", c["id"]).execute()
         rubro_txt = f" [{c['rubro']}]" if c.get("rubro") else ""
+
+        if not confirmar:
+            return f"¿Seguro que querés borrar a *{c['nombre']}*{rubro_txt} — {c['telefono']}? Respondé 'sí' para confirmar."
+
+        supabase.table("contactos").delete().eq("id", c["id"]).execute()
         return f"🗑️ Contacto eliminado: {c['nombre']}{rubro_txt} — {c['telefono']}"
     except Exception as e:
         logger.error(f"Error eliminando contacto: {e}")
@@ -504,7 +520,7 @@ def ejecutar_herramienta(nombre: str, inputs: dict, obra_id: int, telegram_id: s
     elif nombre == "limpiar_lista":
         return limpiar_lista(obra_id)
     elif nombre == "eliminar_contacto":
-        return eliminar_contacto(telegram_id, inputs["nombre"])
+        return eliminar_contacto(telegram_id, inputs["nombre"], inputs["confirmar"])
     elif nombre == "guardar_contacto":
         return guardar_contacto(telegram_id, inputs["nombre"], inputs["telefono"], inputs.get("rubro"))
     elif nombre == "ver_contactos":
