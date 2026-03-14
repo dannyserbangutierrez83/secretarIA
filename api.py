@@ -51,6 +51,8 @@ Reglas:
 - Si menciona que gastó plata en algo → usá registrar_gasto
 - Si pregunta cuánto gastó (hoy, esta semana, en total, etc.) → usá ver_gastos
 - Si pide limpiar los comprados → usá limpiar_lista
+- Si menciona un proveedor, contacto o teléfono de alguien que trabaja en obra → usá guardar_contacto
+- Si pregunta por un contacto, teléfono o proveedor → usá ver_contactos
 - Confirmá siempre lo que hiciste en lenguaje simple
 - No inventes IDs, primero mostrá la lista si no sabés los IDs
 - Nunca menciones los IDs al usuario, son solo para uso interno tuyo
@@ -182,6 +184,42 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "guardar_contacto",
+        "description": "Guarda el teléfono de un proveedor o contacto de obra.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {
+                    "type": "string",
+                    "description": "Nombre del contacto. Ej: 'Juan el plomero', 'Ferretería Central'"
+                },
+                "telefono": {
+                    "type": "string",
+                    "description": "Número de teléfono. Ej: '099 123 456'"
+                },
+                "rubro": {
+                    "type": "string",
+                    "description": "Rubro o especialidad opcional. Ej: 'plomero', 'electricista', 'ferretería', 'carpintero'"
+                }
+            },
+            "required": ["nombre", "telefono"]
+        }
+    },
+    {
+        "name": "ver_contactos",
+        "description": "Muestra los contactos y proveedores guardados. Puede filtrar por rubro.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "rubro": {
+                    "type": "string",
+                    "description": "Filtrar por rubro opcional. Ej: 'plomero', 'electricista'. Si se omite, muestra todos."
+                }
+            },
             "required": []
         }
     }
@@ -359,6 +397,44 @@ def ver_gastos(obra_id: int, periodo: str = "total") -> str:
         logger.error(f"Error leyendo gastos: {e}")
         return f"❌ Error: {str(e)}"
 
+def guardar_contacto(constructor_id: str, nombre: str, telefono: str, rubro: str = None) -> str:
+    try:
+        datos = {
+            "constructor_id": constructor_id,
+            "nombre": nombre,
+            "telefono": telefono,
+            "created_at": datetime.now().isoformat()
+        }
+        if rubro:
+            datos["rubro"] = rubro
+        supabase.table("contactos").insert(datos).execute()
+        rubro_txt = f" [{rubro}]" if rubro else ""
+        return f"✅ Contacto guardado: {nombre}{rubro_txt} — {telefono}"
+    except Exception as e:
+        logger.error(f"Error guardando contacto: {e}")
+        return f"❌ Error: {str(e)}"
+
+def ver_contactos(constructor_id: str, rubro: str = None) -> str:
+    try:
+        query = supabase.table("contactos").select("nombre, telefono, rubro").eq("constructor_id", constructor_id)
+        if rubro:
+            query = query.ilike("rubro", f"%{rubro}%")
+        resp = query.order("nombre").execute()
+        contactos = resp.data or []
+
+        if not contactos:
+            msg = f"No hay contactos guardados" + (f" de rubro '{rubro}'" if rubro else "") + "."
+            return msg
+
+        lineas = ["📱 *CONTACTOS:*"]
+        for c in contactos:
+            rubro_txt = f" [{c['rubro']}]" if c.get("rubro") else ""
+            lineas.append(f"  {c['nombre']}{rubro_txt} — {c['telefono']}")
+        return "\n".join(lineas)
+    except Exception as e:
+        logger.error(f"Error leyendo contactos: {e}")
+        return f"❌ Error: {str(e)}"
+
 def calcular_materiales(tipo_trabajo: str, medidas: str, aclaraciones: str = "") -> str:
     # Claude ya tiene el conocimiento — esta función solo devuelve los parámetros
     # para que Claude genere la respuesta con su propio razonamiento
@@ -385,6 +461,10 @@ def ejecutar_herramienta(nombre: str, inputs: dict, obra_id: int, telegram_id: s
         return calcular_materiales(inputs["tipo_trabajo"], inputs["medidas"], inputs.get("aclaraciones", ""))
     elif nombre == "limpiar_lista":
         return limpiar_lista(obra_id)
+    elif nombre == "guardar_contacto":
+        return guardar_contacto(telegram_id, inputs["nombre"], inputs["telefono"], inputs.get("rubro"))
+    elif nombre == "ver_contactos":
+        return ver_contactos(telegram_id, inputs.get("rubro"))
     else:
         return f"Herramienta desconocida: {nombre}"
 
