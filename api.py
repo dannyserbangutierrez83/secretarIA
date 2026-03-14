@@ -307,9 +307,40 @@ def manejar_comando(telegram_id: str, texto: str) -> str | None:
 
     return None
 
+# ── Historial de conversación ──────────────────────────────────────────────────
+MAX_HISTORIAL = 10  # últimos N mensajes (user + assistant)
+
+def cargar_historial(telegram_id: str, obra_id: int) -> list:
+    try:
+        resp = supabase.table("mensajes") \
+            .select("role, content") \
+            .eq("telegram_id", telegram_id) \
+            .eq("obra_id", obra_id) \
+            .order("created_at", desc=True) \
+            .limit(MAX_HISTORIAL) \
+            .execute()
+        mensajes = list(reversed(resp.data or []))
+        return [{"role": m["role"], "content": m["content"]} for m in mensajes]
+    except Exception as e:
+        logger.error(f"Error cargando historial: {e}")
+        return []
+
+def guardar_en_historial(telegram_id: str, obra_id: int, role: str, content: str):
+    try:
+        supabase.table("mensajes").insert({
+            "telegram_id": telegram_id,
+            "obra_id": obra_id,
+            "role": role,
+            "content": content,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+    except Exception as e:
+        logger.error(f"Error guardando historial: {e}")
+
 # ── Procesar mensajes con Claude ───────────────────────────────────────────────
-def procesar_mensaje(mensaje_usuario: str, obra_id: int) -> str:
-    historial = [{"role": "user", "content": mensaje_usuario}]
+def procesar_mensaje(mensaje_usuario: str, obra_id: int, telegram_id: str) -> str:
+    historial_previo = cargar_historial(telegram_id, obra_id)
+    historial = historial_previo + [{"role": "user", "content": mensaje_usuario}]
 
     while True:
         try:
@@ -338,7 +369,10 @@ def procesar_mensaje(mensaje_usuario: str, obra_id: int) -> str:
 
             for bloque in response.content:
                 if hasattr(bloque, "text"):
-                    return bloque.text
+                    respuesta = bloque.text
+                    guardar_en_historial(telegram_id, obra_id, "user", mensaje_usuario)
+                    guardar_en_historial(telegram_id, obra_id, "assistant", respuesta)
+                    return respuesta
 
             return "(sin respuesta)"
 
@@ -396,7 +430,7 @@ def mensaje():
                 "respuesta": "No tenés ninguna obra activa. Creá una con:\n/nueva Nombre de la obra"
             }), 200
 
-        respuesta = procesar_mensaje(texto, obra_id)
+        respuesta = procesar_mensaje(texto, obra_id, constructor_id)
         logger.info(f"Constructor {constructor_id} → OK")
 
         return jsonify({"respuesta": respuesta}), 200
