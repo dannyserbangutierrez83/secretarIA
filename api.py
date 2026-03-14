@@ -41,6 +41,8 @@ Reglas:
 - Si dice que compró UNA PARTE (ej: "compré 10 de las 20 bolsas") → usá actualizar_cantidad
 - Si pregunta cuánto material necesita para una obra o trabajo → usá calcular_materiales
 - Después de calcular_materiales, mostrá el resultado y preguntá si lo agregás a la lista. Si confirma, guardá cada material con guardar_item
+- Si menciona que gastó plata en algo → usá registrar_gasto
+- Si pregunta cuánto gastó (hoy, esta semana, en total, etc.) → usá ver_gastos
 - Si pide limpiar los comprados → usá limpiar_lista
 - Confirmá siempre lo que hiciste en lenguaje simple
 - No inventes IDs, primero mostrá la lista si no sabés los IDs
@@ -107,6 +109,42 @@ TOOLS = [
                 }
             },
             "required": ["id", "cantidad_comprada"]
+        }
+    },
+    {
+        "name": "registrar_gasto",
+        "description": "Registra un gasto en la obra activa.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "descripcion": {
+                    "type": "string",
+                    "description": "Qué se compró o pagó. Ej: 'cemento portland', 'mano de obra carpintero'"
+                },
+                "monto": {
+                    "type": "number",
+                    "description": "Monto gastado en pesos uruguayos."
+                },
+                "categoria": {
+                    "type": "string",
+                    "description": "Categoría opcional. Ej: 'materiales', 'mano de obra', 'herramientas', 'transporte'"
+                }
+            },
+            "required": ["descripcion", "monto"]
+        }
+    },
+    {
+        "name": "ver_gastos",
+        "description": "Muestra el resumen de gastos de la obra activa. Puede filtrar por período.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "periodo": {
+                    "type": "string",
+                    "description": "Período a consultar: 'hoy', 'semana', 'mes', 'total'. Por defecto 'total'."
+                }
+            },
+            "required": []
         }
     },
     {
@@ -261,6 +299,59 @@ def limpiar_lista(obra_id: int) -> str:
         logger.error(f"Error limpiando: {e}")
         return f"❌ Error limpiando: {str(e)}"
 
+def registrar_gasto(obra_id: int, telegram_id: str, descripcion: str, monto: float, categoria: str = None) -> str:
+    try:
+        datos = {
+            "obra_id": obra_id,
+            "telegram_id": telegram_id,
+            "descripcion": descripcion,
+            "monto": monto,
+            "created_at": datetime.now().isoformat()
+        }
+        if categoria:
+            datos["categoria"] = categoria
+        supabase.table("gastos").insert(datos).execute()
+        cat = f" [{categoria}]" if categoria else ""
+        return f"✅ Gasto registrado: {descripcion}{cat} — ${monto:,.0f}"
+    except Exception as e:
+        logger.error(f"Error registrando gasto: {e}")
+        return f"❌ Error: {str(e)}"
+
+def ver_gastos(obra_id: int, periodo: str = "total") -> str:
+    try:
+        from datetime import timezone, timedelta
+        ahora = datetime.now(timezone.utc)
+
+        query = supabase.table("gastos").select("descripcion, monto, categoria, created_at").eq("obra_id", obra_id)
+
+        if periodo == "hoy":
+            desde = ahora.replace(hour=0, minute=0, second=0).isoformat()
+            query = query.gte("created_at", desde)
+        elif periodo == "semana":
+            desde = (ahora - timedelta(days=7)).isoformat()
+            query = query.gte("created_at", desde)
+        elif periodo == "mes":
+            desde = (ahora - timedelta(days=30)).isoformat()
+            query = query.gte("created_at", desde)
+
+        resp = query.order("created_at", desc=True).execute()
+        gastos = resp.data or []
+
+        if not gastos:
+            return f"No hay gastos registrados ({periodo})."
+
+        total = sum(g["monto"] for g in gastos)
+        lineas = [f"💰 *GASTOS ({periodo.upper()}):*"]
+        for g in gastos:
+            fecha = g["created_at"][:10]
+            cat = f" [{g['categoria']}]" if g.get("categoria") else ""
+            lineas.append(f"  {fecha}{cat} {g['descripcion']} — ${g['monto']:,.0f}")
+        lineas.append(f"\n*TOTAL: ${total:,.0f}*")
+        return "\n".join(lineas)
+    except Exception as e:
+        logger.error(f"Error leyendo gastos: {e}")
+        return f"❌ Error: {str(e)}"
+
 def calcular_materiales(tipo_trabajo: str, medidas: str, aclaraciones: str = "") -> str:
     # Claude ya tiene el conocimiento — esta función solo devuelve los parámetros
     # para que Claude genere la respuesta con su propio razonamiento
@@ -270,7 +361,7 @@ def calcular_materiales(tipo_trabajo: str, medidas: str, aclaraciones: str = "")
     detalle += "\n\nCalculá los materiales necesarios con cantidades estimadas, incluyendo un 10% de desperdicio. Listá cada material con su cantidad y unidad."
     return detalle
 
-def ejecutar_herramienta(nombre: str, inputs: dict, obra_id: int) -> str:
+def ejecutar_herramienta(nombre: str, inputs: dict, obra_id: int, telegram_id: str = "") -> str:
     if nombre == "guardar_item":
         return guardar_item(obra_id, inputs["item"], inputs.get("cantidad"))
     elif nombre == "ver_lista":
@@ -279,6 +370,10 @@ def ejecutar_herramienta(nombre: str, inputs: dict, obra_id: int) -> str:
         return marcar_comprado(obra_id, inputs["ids"])
     elif nombre == "actualizar_cantidad":
         return actualizar_cantidad(obra_id, inputs["id"], inputs["cantidad_comprada"])
+    elif nombre == "registrar_gasto":
+        return registrar_gasto(obra_id, telegram_id, inputs["descripcion"], inputs["monto"], inputs.get("categoria"))
+    elif nombre == "ver_gastos":
+        return ver_gastos(obra_id, inputs.get("periodo", "total"))
     elif nombre == "calcular_materiales":
         return calcular_materiales(inputs["tipo_trabajo"], inputs["medidas"], inputs.get("aclaraciones", ""))
     elif nombre == "limpiar_lista":
@@ -458,7 +553,7 @@ def procesar_mensaje(mensaje_usuario: str, obra_id: int, telegram_id: str) -> st
                 resultados = []
                 for bloque in response.content:
                     if bloque.type == "tool_use":
-                        resultado = ejecutar_herramienta(bloque.name, bloque.input, obra_id)
+                        resultado = ejecutar_herramienta(bloque.name, bloque.input, obra_id, telegram_id)
                         resultados.append({
                             "type": "tool_result",
                             "tool_use_id": bloque.id,
