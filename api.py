@@ -3,12 +3,18 @@ API Flask para SecretarIA
 Expone agente_obra.py como servicio HTTP para integración con n8n/Telegram
 """
 import os
+import io
 import logging
 from datetime import datetime
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from dotenv import load_dotenv
 import anthropic
 from supabase import create_client, Client
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
 
 # ── Configuración ──────────────────────────────────────────────────────────────
 load_dotenv()
@@ -51,6 +57,10 @@ Reglas:
 - Si menciona que gastó plata en algo → usá registrar_gasto
 - Si pregunta cuánto gastó (hoy, esta semana, en total, etc.) → usá ver_gastos
 - Si pide limpiar los comprados → usá limpiar_lista
+- Si el constructor quiere armar un presupuesto o agregar ítems con precio → usá agregar_linea_presupuesto
+- Si pregunta cómo va el presupuesto o quiere verlo → usá ver_presupuesto
+- Si pide quitar una línea del presupuesto → usá quitar_linea_presupuesto con confirmar=false primero
+- Si pide generar o descargar el PDF del presupuesto → respondé exactamente: [GENERAR_PDF]
 - Si menciona un proveedor, contacto o teléfono de alguien que trabaja en obra → usá guardar_contacto
 - Si pregunta por un contacto, teléfono o proveedor → usá ver_contactos
 - Si pide borrar o eliminar un contacto → usá eliminar_contacto con confirmar=false primero, y solo con confirmar=true cuando el usuario haya confirmado explícitamente
@@ -186,6 +196,37 @@ TOOLS = [
             "type": "object",
             "properties": {},
             "required": []
+        }
+    },
+    {
+        "name": "agregar_linea_presupuesto",
+        "description": "Agrega una línea al presupuesto de la obra activa.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "descripcion": {"type": "string", "description": "Qué es. Ej: 'Cemento portland', 'Mano de obra albañil'"},
+                "cantidad": {"type": "number", "description": "Cantidad. Ej: 20"},
+                "unidad": {"type": "string", "description": "Unidad. Ej: 'bolsas', 'm2', 'horas', 'global'"},
+                "precio_unitario": {"type": "number", "description": "Precio por unidad en pesos uruguayos."}
+            },
+            "required": ["descripcion", "cantidad", "unidad", "precio_unitario"]
+        }
+    },
+    {
+        "name": "ver_presupuesto",
+        "description": "Muestra el presupuesto actual de la obra con desglose y total.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "quitar_linea_presupuesto",
+        "description": "Quita una línea del presupuesto. Usar confirmar=false primero, confirmar=true solo cuando el usuario confirmó.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "descripcion": {"type": "string", "description": "Descripción de la línea a quitar."},
+                "confirmar": {"type": "boolean", "description": "false = mostrar qué se borra y pedir confirmación. true = borrar."}
+            },
+            "required": ["descripcion", "confirmar"]
         }
     },
     {
@@ -416,6 +457,70 @@ def ver_gastos(obra_id: int, periodo: str = "total") -> str:
         logger.error(f"Error leyendo gastos: {e}")
         return f"❌ Error: {str(e)}"
 
+def agregar_linea_presupuesto(obra_id: int, descripcion: str, cantidad: float, unidad: str, precio_unitario: float) -> str:
+    try:
+        supabase.table("presupuesto_items").insert({
+            "obra_id": obra_id,
+            "descripcion": descripcion,
+            "cantidad": cantidad,
+            "unidad": unidad,
+            "precio_unitario": precio_unitario,
+            "created_at": datetime.now().isoformat()
+        }).execute()
+        subtotal = cantidad * precio_unitario
+        return f"✅ Agregado: {descripcion} — {cantidad} {unidad} x ${precio_unitario:,.0f} = ${subtotal:,.0f}"
+    except Exception as e:
+        logger.error(f"Error agregando línea presupuesto: {e}")
+        return f"❌ Error: {str(e)}"
+
+def ver_presupuesto(obra_id: int) -> str:
+    try:
+        resp = supabase.table("presupuesto_items").select("id, descripcion, cantidad, unidad, precio_unitario") \
+            .eq("obra_id", obra_id).order("created_at").execute()
+        items = resp.data or []
+
+        if not items:
+            return "El presupuesto está vacío. Agregá líneas con descripciones, cantidades y precios."
+
+        lineas = ["📄 *PRESUPUESTO:*"]
+        total = 0
+        for i in items:
+            subtotal = i["cantidad"] * i["precio_unitario"]
+            total += subtotal
+            lineas.append(f"  [{i['id']}] {i['descripcion']} — {i['cantidad']} {i['unidad']} x ${i['precio_unitario']:,.0f} = ${subtotal:,.0f}")
+        lineas.append(f"\n*TOTAL: ${total:,.0f}*")
+        lineas.append("\nPara generar el PDF decí 'generá el presupuesto'.")
+        return "\n".join(lineas)
+    except Exception as e:
+        logger.error(f"Error leyendo presupuesto: {e}")
+        return f"❌ Error: {str(e)}"
+
+def quitar_linea_presupuesto(obra_id: int, descripcion: str, confirmar: bool) -> str:
+    try:
+        resp = supabase.table("presupuesto_items").select("id, descripcion, cantidad, unidad, precio_unitario") \
+            .eq("obra_id", obra_id).ilike("descripcion", f"%{descripcion}%").execute()
+        encontrados = resp.data or []
+
+        if not encontrados:
+            return "⚠️ No encontré ninguna línea con esa descripción."
+
+        if len(encontrados) > 1:
+            lineas = ["⚠️ Encontré varias líneas con esa descripción:"]
+            for i in encontrados:
+                lineas.append(f"  [{i['id']}] {i['descripcion']} — {i['cantidad']} {i['unidad']}")
+            lineas.append("Sé más específico.")
+            return "\n".join(lineas)
+
+        item = encontrados[0]
+        if not confirmar:
+            return f"¿Seguro que querés quitar *{item['descripcion']}* ({item['cantidad']} {item['unidad']})? Respondé 'sí' para confirmar."
+
+        supabase.table("presupuesto_items").delete().eq("id", item["id"]).execute()
+        return f"🗑️ Quitado del presupuesto: {item['descripcion']}"
+    except Exception as e:
+        logger.error(f"Error quitando línea: {e}")
+        return f"❌ Error: {str(e)}"
+
 def guardar_contacto(constructor_id: str, nombre: str, telefono: str, rubro: str = None) -> str:
     try:
         datos = {
@@ -519,6 +624,12 @@ def ejecutar_herramienta(nombre: str, inputs: dict, obra_id: int, telegram_id: s
         return calcular_materiales(inputs["tipo_trabajo"], inputs["medidas"], inputs.get("aclaraciones", ""))
     elif nombre == "limpiar_lista":
         return limpiar_lista(obra_id)
+    elif nombre == "agregar_linea_presupuesto":
+        return agregar_linea_presupuesto(obra_id, inputs["descripcion"], inputs["cantidad"], inputs["unidad"], inputs["precio_unitario"])
+    elif nombre == "ver_presupuesto":
+        return ver_presupuesto(obra_id)
+    elif nombre == "quitar_linea_presupuesto":
+        return quitar_linea_presupuesto(obra_id, inputs["descripcion"], inputs["confirmar"])
     elif nombre == "eliminar_contacto":
         return eliminar_contacto(telegram_id, inputs["nombre"], inputs["confirmar"])
     elif nombre == "guardar_contacto":
@@ -830,6 +941,94 @@ def lista():
 
     except Exception as e:
         logger.error(f"Error en /lista: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/presupuesto/pdf", methods=["POST"])
+def presupuesto_pdf():
+    """Genera el PDF del presupuesto de la obra activa."""
+    if not validar_secret(request):
+        return jsonify({"error": "No autorizado"}), 401
+
+    try:
+        data = request.get_json()
+        constructor_id = str(data.get("constructor_id", "")).strip()
+        if not constructor_id:
+            return jsonify({"error": "Falta 'constructor_id'"}), 400
+
+        obra_id = obtener_obra_activa(constructor_id)
+        if obra_id is None:
+            return jsonify({"error": "No tenés obra activa"}), 400
+
+        # Obtener nombre de la obra
+        obra_resp = supabase.table("obras").select("nombre").eq("id", obra_id).execute()
+        nombre_obra = obra_resp.data[0]["nombre"] if obra_resp.data else "Obra"
+
+        # Obtener ítems del presupuesto
+        items_resp = supabase.table("presupuesto_items").select("descripcion, cantidad, unidad, precio_unitario") \
+            .eq("obra_id", obra_id).order("created_at").execute()
+        items = items_resp.data or []
+
+        if not items:
+            return jsonify({"error": "El presupuesto está vacío"}), 400
+
+        # Generar PDF en memoria
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4,
+                                leftMargin=2*cm, rightMargin=2*cm,
+                                topMargin=2*cm, bottomMargin=2*cm)
+
+        styles = getSampleStyleSheet()
+        titulo_style = ParagraphStyle("titulo", parent=styles["Heading1"], fontSize=18, spaceAfter=6)
+        sub_style = ParagraphStyle("sub", parent=styles["Normal"], fontSize=11, spaceAfter=12, textColor=colors.grey)
+
+        elementos = []
+        elementos.append(Paragraph("PRESUPUESTO DE OBRA", titulo_style))
+        elementos.append(Paragraph(nombre_obra, sub_style))
+        elementos.append(Paragraph(f"Fecha: {datetime.now().strftime('%d/%m/%Y')}", sub_style))
+        elementos.append(Spacer(1, 0.5*cm))
+
+        # Tabla
+        encabezado = ["Descripción", "Cantidad", "Unidad", "Precio unit.", "Subtotal"]
+        filas = [encabezado]
+        total = 0
+        for i in items:
+            subtotal = i["cantidad"] * i["precio_unitario"]
+            total += subtotal
+            filas.append([
+                i["descripcion"],
+                f"{i['cantidad']:,.0f}",
+                i["unidad"],
+                f"${i['precio_unitario']:,.0f}",
+                f"${subtotal:,.0f}"
+            ])
+        filas.append(["", "", "", "TOTAL", f"${total:,.0f}"])
+
+        tabla = Table(filas, colWidths=[7*cm, 2.5*cm, 2.5*cm, 3*cm, 3*cm])
+        tabla.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 10),
+            ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, colors.HexColor("#f5f5f5")]),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#2c3e50")),
+            ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+
+        elementos.append(tabla)
+        doc.build(elementos)
+        buffer.seek(0)
+
+        nombre_archivo = f"presupuesto_{nombre_obra.replace(' ', '_')}.pdf"
+        return send_file(buffer, mimetype="application/pdf",
+                         as_attachment=True, download_name=nombre_archivo)
+
+    except Exception as e:
+        logger.error(f"Error generando PDF: {e}")
         return jsonify({"error": str(e)}), 500
 
 # ── Error handlers ─────────────────────────────────────────────────────────────
