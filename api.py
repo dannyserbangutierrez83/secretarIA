@@ -39,6 +39,8 @@ Reglas:
 - Si pregunta qué tiene pendiente → usá ver_lista
 - Si dice que compró TODO de algo → usá marcar_comprado con el ID correcto
 - Si dice que compró UNA PARTE (ej: "compré 10 de las 20 bolsas") → usá actualizar_cantidad
+- Si pregunta cuánto material necesita para una obra o trabajo → usá calcular_materiales
+- Después de calcular_materiales, mostrá el resultado y preguntá si lo agregás a la lista. Si confirma, guardá cada material con guardar_item
 - Si pide limpiar los comprados → usá limpiar_lista
 - Confirmá siempre lo que hiciste en lenguaje simple
 - No inventes IDs, primero mostrá la lista si no sabés los IDs
@@ -105,6 +107,28 @@ TOOLS = [
                 }
             },
             "required": ["id", "cantidad_comprada"]
+        }
+    },
+    {
+        "name": "calcular_materiales",
+        "description": "Calcula los materiales necesarios para un trabajo de construcción según el tipo y las medidas. Devuelve una lista con cantidades estimadas.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tipo_trabajo": {
+                    "type": "string",
+                    "description": "Tipo de trabajo. Ej: 'losa', 'pared de ladrillos', 'contrapiso', 'revoque', 'pintura interior'"
+                },
+                "medidas": {
+                    "type": "string",
+                    "description": "Medidas del trabajo. Ej: '40m2', '10m x 3m de alto', '6m x 4m x 0.15m de espesor'"
+                },
+                "aclaraciones": {
+                    "type": "string",
+                    "description": "Detalles adicionales opcionales. Ej: 'es hormigón armado', 'ladrillo hueco 18cm', 'dos manos de pintura'"
+                }
+            },
+            "required": ["tipo_trabajo", "medidas"]
         }
     },
     {
@@ -237,6 +261,15 @@ def limpiar_lista(obra_id: int) -> str:
         logger.error(f"Error limpiando: {e}")
         return f"❌ Error limpiando: {str(e)}"
 
+def calcular_materiales(tipo_trabajo: str, medidas: str, aclaraciones: str = "") -> str:
+    # Claude ya tiene el conocimiento — esta función solo devuelve los parámetros
+    # para que Claude genere la respuesta con su propio razonamiento
+    detalle = f"Tipo de trabajo: {tipo_trabajo}\nMedidas: {medidas}"
+    if aclaraciones:
+        detalle += f"\nAclaraciones: {aclaraciones}"
+    detalle += "\n\nCalculá los materiales necesarios con cantidades estimadas, incluyendo un 10% de desperdicio. Listá cada material con su cantidad y unidad."
+    return detalle
+
 def ejecutar_herramienta(nombre: str, inputs: dict, obra_id: int) -> str:
     if nombre == "guardar_item":
         return guardar_item(obra_id, inputs["item"], inputs.get("cantidad"))
@@ -246,6 +279,8 @@ def ejecutar_herramienta(nombre: str, inputs: dict, obra_id: int) -> str:
         return marcar_comprado(obra_id, inputs["ids"])
     elif nombre == "actualizar_cantidad":
         return actualizar_cantidad(obra_id, inputs["id"], inputs["cantidad_comprada"])
+    elif nombre == "calcular_materiales":
+        return calcular_materiales(inputs["tipo_trabajo"], inputs["medidas"], inputs.get("aclaraciones", ""))
     elif nombre == "limpiar_lista":
         return limpiar_lista(obra_id)
     else:
