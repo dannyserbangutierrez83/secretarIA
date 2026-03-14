@@ -53,6 +53,7 @@ Reglas:
 - Si pide limpiar los comprados → usá limpiar_lista
 - Si menciona un proveedor, contacto o teléfono de alguien que trabaja en obra → usá guardar_contacto
 - Si pregunta por un contacto, teléfono o proveedor → usá ver_contactos
+- Si pide borrar o eliminar un contacto → usá eliminar_contacto
 - Confirmá siempre lo que hiciste en lenguaje simple
 - No inventes IDs, primero mostrá la lista si no sabés los IDs
 - Nunca menciones los IDs al usuario, son solo para uso interno tuyo
@@ -207,6 +208,20 @@ TOOLS = [
                 }
             },
             "required": ["nombre", "telefono"]
+        }
+    },
+    {
+        "name": "eliminar_contacto",
+        "description": "Elimina un contacto por nombre. Si hay varios con ese nombre, muestra cuáles son para que el usuario confirme cuál borrar.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {
+                    "type": "string",
+                    "description": "Nombre del contacto a eliminar. Ej: 'Juan el plomero'"
+                }
+            },
+            "required": ["nombre"]
         }
     },
     {
@@ -435,6 +450,33 @@ def ver_contactos(constructor_id: str, rubro: str = None) -> str:
         logger.error(f"Error leyendo contactos: {e}")
         return f"❌ Error: {str(e)}"
 
+def eliminar_contacto(constructor_id: str, nombre: str) -> str:
+    try:
+        resp = supabase.table("contactos").select("id, nombre, telefono, rubro") \
+            .eq("constructor_id", constructor_id) \
+            .ilike("nombre", f"%{nombre}%") \
+            .execute()
+        encontrados = resp.data or []
+
+        if not encontrados:
+            return f"⚠️ No encontré ningún contacto con ese nombre."
+
+        if len(encontrados) > 1:
+            lineas = [f"⚠️ Encontré varios contactos con ese nombre, ¿cuál querés borrar?"]
+            for c in encontrados:
+                rubro_txt = f" [{c['rubro']}]" if c.get("rubro") else ""
+                lineas.append(f"  {c['nombre']}{rubro_txt} — {c['telefono']}")
+            lineas.append("Sé más específico con el nombre.")
+            return "\n".join(lineas)
+
+        c = encontrados[0]
+        supabase.table("contactos").delete().eq("id", c["id"]).execute()
+        rubro_txt = f" [{c['rubro']}]" if c.get("rubro") else ""
+        return f"🗑️ Contacto eliminado: {c['nombre']}{rubro_txt} — {c['telefono']}"
+    except Exception as e:
+        logger.error(f"Error eliminando contacto: {e}")
+        return f"❌ Error: {str(e)}"
+
 def calcular_materiales(tipo_trabajo: str, medidas: str, aclaraciones: str = "") -> str:
     # Claude ya tiene el conocimiento — esta función solo devuelve los parámetros
     # para que Claude genere la respuesta con su propio razonamiento
@@ -461,6 +503,8 @@ def ejecutar_herramienta(nombre: str, inputs: dict, obra_id: int, telegram_id: s
         return calcular_materiales(inputs["tipo_trabajo"], inputs["medidas"], inputs.get("aclaraciones", ""))
     elif nombre == "limpiar_lista":
         return limpiar_lista(obra_id)
+    elif nombre == "eliminar_contacto":
+        return eliminar_contacto(telegram_id, inputs["nombre"])
     elif nombre == "guardar_contacto":
         return guardar_contacto(telegram_id, inputs["nombre"], inputs["telefono"], inputs.get("rubro"))
     elif nombre == "ver_contactos":
